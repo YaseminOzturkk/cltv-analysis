@@ -1,0 +1,138 @@
+!pip install lifetimes
+import datetime as dt
+import pandas as pd
+import matplotlib.pyplot as plt
+from lifetimes import BetaGeoFitter
+from lifetimes import GammaGammaFitter
+from lifetimes.plotting import plot_period_transactions
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 500)
+pd.set_option('display.float_format', lambda x: '%.4f' % x)
+from sklearn.preprocessing import MinMaxScaler
+
+
+# verinin okunması ve veriye hızlı bakış sağlayalım
+
+df_ = pd.read_csv("flo_data_20K.csv")
+df = df_.copy()
+df.describe().T
+df.head()
+df.isnull().sum()
+
+# Aykırı değerleri baskılamak için gerekli olan outlier_thresholds ve replace_with_thresholds fonksiyonlarını tanımlayalım.
+
+def outlier_thresholds(dataframe, variable):
+    quartile1 = dataframe[variable].quantile(0.01)
+    quartile3 = dataframe[variable].quantile(0.99)
+    interquantile_range = quartile3 - quartile1
+    up_limit = quartile3 + 1.5 * interquantile_range
+    low_limit = quartile1 - 1.5 * interquantile_range
+    return low_limit, up_limit
+
+def replace_with_thresholds(dataframe, variable):
+    low_limit, up_limit = outlier_thresholds(dataframe, variable)
+    dataframe.loc[(dataframe[variable] < low_limit), variable] = round(low_limit,0)
+    dataframe.loc[(dataframe[variable] > up_limit), variable] = round(up_limit,0)
+
+# Sipariş ve fatura değerine ait aykırı değerleri baskılayalım
+
+num_values_col = ["order_num_total_ever_online", "order_num_total_ever_offline", "customer_value_total_ever_offline", "customer_value_total_ever_online"]
+for col in num_values_col:
+    replace_with_thresholds(df, col)
+
+# Genel veriler ile analiz yapabilmek için online ve offline kanalları birleştirelim.
+
+df["order_num_total"] = df["order_num_total_ever_online"] + df["order_num_total_ever_offline"]
+df["customer_value_total"] = df["customer_value_total_ever_online"] + df["customer_value_total_ever_offline"]
+
+# Tarihler analiz için önem arz ettiğinden tarih barındıran değişkenleri “datetime64[ns]” tipine çevirelim.
+
+for i in df.columns:
+    if "date" in i:
+       df[i] = df[i].astype("datetime64[ns]")
+
+# Veri setindeki en son alışverişin yapıldığı tarihten 2 gün sonrasını analiz tarihi olarak alalım.
+
+df["last_order_date"].max()
+today_date = dt.datetime(2021, 6, 1)
+type(today_date)
+
+# 
+
+cltv_df = pd.DataFrame()
+cltv_df = pd.DataFrame({"customer_id": df["master_id"],
+             "recency_cltv_weekly": ((df["last_order_date"] - df["first_order_date"]).dt.days)/7,
+             "T_weekly": ((today_date - df["first_order_date"]).astype('timedelta64[D]'))/7,
+             "frequency": df["order_num_total"],
+             "monetary_cltv_avg": df["customer_value_total"] / df["order_num_total"]})
+
+cltv_df.head()
+cltv_df.reset_index()
+
+
+bgf = BetaGeoFitter(penalizer_coef=0.001)
+bgf.fit(cltv_df['frequency'],
+        cltv_df['recency_cltv_weekly'],
+        cltv_df['T_weekly'])
+
+bgf.predict(4 * 3,
+            cltv_df['frequency'],
+            cltv_df['recency_cltv_weekly'],
+            cltv_df['T_weekly']).sum()
+
+cltv_df["expected_purc_3_month"] = bgf.predict(4 * 3,
+                                               cltv_df['frequency'],
+                                               cltv_df['recency_cltv_weekly'],
+                                               cltv_df['T_weekly'])
+
+bgf.predict(4 * 6,
+            cltv_df['frequency'],
+            cltv_df['recency_cltv_weekly'],
+            cltv_df['T_weekly']).sum()
+
+cltv_df["expected_sales_3_month"] = bgf.predict(4 * 6,
+                                               cltv_df['frequency'],
+                                               cltv_df['recency_cltv_weekly'],
+                                               cltv_df['T_weekly'])
+
+cltv_df.head()
+
+ggf = GammaGammaFitter(penalizer_coef=0.01)
+ggf.fit(cltv_df['frequency'], cltv_df['monetary_cltv_avg'])
+cltv_df["exp_average_value"] = ggf.conditional_expected_average_profit(cltv_df['frequency'],
+                                                                cltv_df['monetary_cltv_avg'])
+cltv_df.head()
+
+cltv = ggf.customer_lifetime_value(bgf,
+                                   cltv_df['frequency'],
+                                   cltv_df['recency_cltv_weekly'],
+                                   cltv_df['T_weekly'],
+                                   cltv_df['monetary_cltv_avg'],
+                                   time=6,  # 6aylık
+                                   freq="W",  # hafta
+                                   discount_rate=0.05)
+
+cltv_df["cltv"] = cltv
+
+cltv_df.sort_values(by="cltv", ascending=False).head(20)
+
+cltv_df["segment"] = pd.qcut(cltv_df["cltv"], 4, labels=["D", "C", "B", "A"])
+cltv_df.head()
+
+cltv_df.groupby("segment").agg(
+    {"count", "mean", "sum"})
+
+cltv_df["segment"] = pd.qcut(cltv_df["cltv"], 3, labels=["C", "B", "A"])
+cltv_df.head()
+cltv_df.groupby("segment").agg(
+    {"count", "mean", "sum"})
+
+
+
+
+
+
+
+
+
